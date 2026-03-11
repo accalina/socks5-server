@@ -1,61 +1,89 @@
 name: "Latest tag from master branch"
+
 env:
-  DOCKERHUB_REPOSITORY: serjs/go-socks5-proxy
+  DOCKERHUB_REPOSITORY: accalina/go-socks5-proxy
 
 on:
   pull_request:
-    branches: master
+    branches: [ master ]
   push:
-    branches: master
+    branches: [ master ]
   release:
     types: [published, edited]
 
 jobs:
   hadolint:
-    name: hadolint
+    name: Lint Dockerfile
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@master
-    - name: hadolint
-      uses: hadolint/hadolint-action@v1.5.0
-      with:
-        ignore: DL3018
-  docker:
-    runs-on: ubuntu-latest
-    steps:
-      -
-        name: Checkout
-        uses: actions/checkout@v1
-      -
-        name: Set up Docker Buildx
-        id: buildx
-        uses: crazy-max/ghaction-docker-buildx@v1.1.0
-      -
-        name: Print builder available platforms
-        run: echo ${{ steps.buildx.outputs.platforms }}
-      -
-        id: meta
-        uses: docker/metadata-action@v3
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@v3.1.0
         with:
-          images: serjs/go-socks5-proxy
+          ignore: DL3018
+
+  scan:
+    name: Security Scan (Trivy)
+    needs: hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build local image for scanning
+        run: |
+          docker build -t trivy-scan-target:${{ github.sha }} .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          image-ref: 'trivy-scan-target:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1' # Fails the build if vulnerabilities are found
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  docker:
+    name: Build and Push
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_REPOSITORY }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{raw}}
-      -
-        name: Dockerhub login
-        uses: docker/login-action@v2
+            type=semver,pattern={{version}}
+
+      - name: Login to DockerHub
         if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      -
-        name: Run Buildx for amd64, armv7, arm64 architectures
-        uses: docker/build-push-action@v2
+
+      - name: Build and push multi-arch
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm/v7,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
