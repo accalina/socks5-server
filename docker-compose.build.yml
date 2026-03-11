@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: socks5-build
+    container_name: ghcr.io/accalina/socks5-build:1.0
     env_file: .env
     ports:
       - "1080:1080"
